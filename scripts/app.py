@@ -6,19 +6,17 @@ from reppo.vetoken import (
     VeTokenomicsSimulation,
     SimulationParams,
     MarketState,
-    VestingSchedule
+)
+from reppo.vesting import (
+    VestingSchedule,
+    LinearVestingSchedule,
+    CliffVestingSchedule
 )
 
 st.set_page_config(layout="wide")
 
 def create_simulation_inputs():
     st.sidebar.header("Simulation Parameters")
-    
-    with st.sidebar.expander("Vesting Schedule"):
-        initial_amount = st.number_input("Initial Amount", value=1_000_000, step=100_000)
-        cliff_epoch = st.number_input("Cliff Epoch", value=26, step=1)
-        vesting_duration = st.number_input("Vesting Duration", value=104, step=1)
-        release_frequency = st.number_input("Release Frequency", value=13, step=1)
     
     with st.sidebar.expander("Protocol Parameters"):
         gamma = st.slider("Gamma (veToken power)", 1.0, 4.0, 2.0, 0.1)
@@ -42,17 +40,20 @@ def create_simulation_inputs():
         initial_token_supply = st.number_input("Initial Token Supply", value=1_000_000, step=100_000)
         epochs = st.number_input("Epochs to Simulate", value=120, step=10)
 
+    vesting_duration = None
     with st.sidebar.expander("Emission Parameters"):
         initial_emission = st.number_input("Initial Emission Rate", value=1000, step=100)
         decay_rate = st.slider("Emission Decay Rate", 0.0, 0.2, 0.05, 0.01)
-            
+        enable_vesting = st.checkbox("Enable Emission Vesting", value=False)
+        if enable_vesting:
+            vesting_duration = st.number_input(
+                "Vesting Duration (epochs)", 
+                value=13, 
+                step=1, 
+                help="Duration over which emissions vest linearly"
+            )
+
     return {
-        "vesting": VestingSchedule(
-            initial_amount=initial_amount,
-            cliff_epoch=cliff_epoch,
-            vesting_duration=vesting_duration,
-            release_frequency=release_frequency
-        ),
         "protocol": {
             "gamma": gamma,
             "alpha": alpha,
@@ -77,7 +78,8 @@ def create_simulation_inputs():
         },
         "emissions": {
             "initial_rate": initial_emission,
-            "decay_rate": decay_rate
+            "decay_rate": decay_rate,
+            "vesting_duration": vesting_duration
         }
     }
 
@@ -101,8 +103,8 @@ def create_simulation(inputs):
         initial_token_supply=inputs["general"]["initial_token_supply"],
         epochs=inputs["general"]["epochs"],
         market=inputs["market"],
-        vesting=inputs["vesting"],
-        emission_schedule=emission_schedule
+        emission_vesting_duration=inputs["emissions"].get("vesting_duration", None),
+        emission_schedule=emission_schedule,
     )
     
     return VeTokenomicsSimulation(params)
@@ -116,11 +118,14 @@ def create_pod_metrics_tab(history):
     pod_data = []
     for epoch_data in history:
         metrics = epoch_data['metrics']
+        total_epoch_emissions = metrics.get('emissions_this_epoch', 0)
+        
         for pod_name, emissions in epoch_data['pod_emissions'].items():
             pod_data.append({
                 'epoch': epoch_data['epoch'],
                 'pod': pod_name,
                 'emissions': emissions,
+                'total_epoch_emissions': total_epoch_emissions,  # Add total emissions
                 'votes': metrics.get('vote_distribution', {}).get(pod_name, 0),
                 'fees': metrics.get('pod_fees', {}).get(pod_name, 0),
                 'fcus': metrics.get('pod_fcus', {}).get(pod_name, 0),
@@ -132,6 +137,9 @@ def create_pod_metrics_tab(history):
             })
     
     pod_df = pd.DataFrame(pod_data)
+    
+    # Create a separate DataFrame for total emissions
+    total_emissions_df = pod_df.groupby('epoch')[['total_epoch_emissions']].first().reset_index()
     
     col1, col2 = st.columns(2)
     
@@ -161,21 +169,32 @@ def create_pod_metrics_tab(history):
         st.altair_chart(votes_chart, use_container_width=True)
     
     with col2:
-        # Cumulative Metrics
         tabs = st.tabs(["Current", "Cumulative", "Efficiency"])
         
         with tabs[0]:
-            # Pod Emissions Chart
+            # Base Pod Emissions Chart
             emissions_chart = alt.Chart(pod_df).mark_line().encode(
                 x=alt.X('epoch:Q', title='Epoch'),
                 y=alt.Y('emissions:Q', title='Emissions'),
                 color=alt.Color('pod:N', title='Pod')
-            ).properties(
-                title='Pod Emissions',
+            )
+            
+            # Total Emissions Line
+            total_emissions_line = alt.Chart(total_emissions_df).mark_line(
+                strokeDash=[5, 5],  # Create a dashed line
+                color='red'
+            ).encode(
+                x='epoch:Q',
+                y='total_epoch_emissions:Q'
+            )
+            
+            # Combine the charts
+            combined_emissions = (emissions_chart + total_emissions_line).properties(
+                title='Pod Emissions (Red Dashed = Total Epoch Emissions)',
                 width=400,
                 height=300
             )
-            st.altair_chart(emissions_chart, use_container_width=True)
+            st.altair_chart(combined_emissions, use_container_width=True)
             
             # FCUs Chart
             fcus_chart = alt.Chart(pod_df).mark_line().encode(
@@ -189,6 +208,7 @@ def create_pod_metrics_tab(history):
             )
             st.altair_chart(fcus_chart, use_container_width=True)
             
+        # Rest of the tabs remain the same
         with tabs[1]:
             # Cumulative Fees
             cum_fees_chart = alt.Chart(pod_df).mark_line().encode(
@@ -335,10 +355,12 @@ def create_market_metrics_tab(history):
         comparison_df = pd.DataFrame({
             'epoch': df['epoch'],
             'Total Fees': df['metrics'].apply(lambda x: x['total_fees']),
-            'Total Emissions': df['total_emissions']
+            'Total Emissions': df['metrics'].apply(lambda x: x['total_emissions']),
+            'Vested Emissions': df['metrics'].apply(lambda x: x['total_vested']),
+            'Unvested Emissions': df['metrics'].apply(lambda x: x.get('unvested_emissions', 0))
         }).melt(
             id_vars=['epoch'],
-            value_vars=['Total Fees', 'Total Emissions'],
+            value_vars=['Total Fees', 'Total Emissions', 'Vested Emissions', 'Unvested Emissions'],
             var_name='metric',
             value_name='value'
         )
@@ -365,7 +387,30 @@ def create_market_metrics_tab(history):
         )
         st.altair_chart(vesting_chart, use_container_width=True)
 
+def check_password():
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+        
+    if not st.session_state.authenticated:
+        with st.form("auth_form"):
+            st.text_input("Enter password:", type="password", key="password_input")
+            if not st.secrets.get("APP_PASSWORD"):
+                st.error("No password set in secrets. Please set the APP_PASSWORD in the secrets manager.")
+                st.stop()
+            
+            submitted = st.form_submit_button("Login")
+            if submitted:
+                if st.session_state.password_input == st.secrets["APP_PASSWORD"]:
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password")
+                    st.stop()
+        st.stop()
+
 def main():
+    check_password()
+
     st.title("VeTokenomics Simulation")
     
     inputs = create_simulation_inputs()  # Assuming this function exists as before

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from enum import Enum
 import numpy as np
 from numpy.random import Generator, PCG64
-
+from reppo.vesting import VestingSchedule, VestingManager
 class EventType(Enum):
     LOCK_EXPIRY = "lock_expiry"
     FCU_ACTIVATION = "fcu_activation" 
@@ -34,61 +34,6 @@ class MarketState:
     def get_market_factor(self, initial_rate: float) -> float:
         return self.base_fee_rate / initial_rate if initial_rate > 0 else 1.0
 
-class VestingSchedule:
-    def __init__(
-        self,
-        initial_amount: float,
-        cliff_epoch: int,
-        vesting_duration: int,
-        release_frequency: int
-    ) -> None:
-        if initial_amount <= 0:
-            raise ValueError("Initial amount must be positive")
-        if cliff_epoch < 0:
-            raise ValueError("Cliff epoch cannot be negative")
-        if vesting_duration <= 0:
-            raise ValueError("Vesting duration must be positive")
-        if release_frequency <= 0:
-            raise ValueError("Release frequency must be positive")
-        if release_frequency > vesting_duration:
-            raise ValueError("Release frequency cannot exceed vesting duration")
-
-        self.initial_amount = initial_amount
-        self.cliff_epoch = cliff_epoch
-        self.vesting_duration = vesting_duration
-        self.release_frequency = release_frequency
-        
-        self.release_epochs = []
-        self.amounts = []
-        self._initialize_schedule()
-    
-    def _initialize_schedule(self) -> None:
-        num_releases = self.vesting_duration // self.release_frequency
-        amount_per_release = self.initial_amount / num_releases
-        
-        for i in range(num_releases):
-            epoch = self.cliff_epoch + (i * self.release_frequency)
-            self.release_epochs.append(epoch)
-            self.amounts.append(amount_per_release)
-    
-    def tokens_to_release(self, epoch: int) -> float:
-        if epoch < self.cliff_epoch:
-            return 0.0
-        
-        if epoch in self.release_epochs:
-            index = self.release_epochs.index(epoch)
-            return self.amounts[index]
-        
-        return 0.0
-
-    def remaining_tokens(self, epoch: int) -> float:
-        if epoch < self.cliff_epoch:
-            return self.initial_amount
-            
-        released = sum(amount for e, amount in zip(self.release_epochs, self.amounts) 
-                      if e <= epoch)
-        return self.initial_amount - released
-    
 class SystemState:
     def __init__(self, params):
         self.epoch = 0
@@ -121,7 +66,9 @@ class SystemState:
             'active_positions': 0,
             'emissions_this_epoch': 0.0,
             'total_emissions': 0.0,
-            'total_vested': 0.0
+            'total_vested': 0.0,
+            'unvested_emissions': 0.0,
+            'raw_emissions_this_epoch': 0.0,
         }
     
     def update_metrics(self) -> None:
@@ -200,7 +147,7 @@ class PodState:
     @property
     def avg_vote_share(self) -> float:
         return self.cumulative_vote_share / self.vote_samples if self.vote_samples > 0 else 0
-
+    
 @dataclass
 class SimulationParams:
     gamma: float  
@@ -216,8 +163,9 @@ class SimulationParams:
     initial_token_supply: float
     epochs: int
     market: MarketState
-    vesting: Optional[VestingSchedule] = None
+    # vesting: Optional[VestingSchedule] = None
     emission_schedule: Optional[Callable[[SystemState], float]] = None
+    emission_vesting_duration: Optional[int] = None  # None means instant vesting
     
     # # features to be included soon...
     # min_viable_fees: float 
@@ -250,6 +198,10 @@ class VeTokenomicsSimulation:
         self.events: List[Event] = []
         self.rng = np.random.Generator(PCG64())
         self.history: List[dict] = []
+        if params.emission_vesting_duration:
+            self.vesting_manager = VestingManager(params.emission_vesting_duration)
+        else:
+            self.vesting_manager = None
         self._init_events()
     
     def extend_lock(self, position_index: int, new_duration: int) -> None:
@@ -286,38 +238,20 @@ class VeTokenomicsSimulation:
             raise ValueError("Emission schedule not provided")
             
         market_factor = self.state.market_state.base_fee_rate / self.params.market.base_fee_rate
-        emission = base_emission * market_factor
+        market_adjusted_emission = base_emission * market_factor
         
-        # Add vested tokens if there's a vesting schedule
-        vested_amount = 0.0
-        if self.params.vesting:
-            vested_amount = self.params.vesting.tokens_to_release(self.state.epoch)
+        # Track the raw emission before vesting
+        self.state.metrics['raw_emissions_this_epoch'] = market_adjusted_emission
+        self.state.metrics['total_emissions'] += market_adjusted_emission
+        
+        # Handle vesting
+        if self.vesting_manager:
+            self.vesting_manager.add_emission(market_adjusted_emission, self.state.epoch)
+            vested_amount = self.vesting_manager.tokens_to_release(self.state.epoch)
             self.state.metrics['total_vested'] += vested_amount
-            
-        total_emission = emission + vested_amount
-        self.state.metrics['emissions_this_epoch'] = total_emission
-        self.state.metrics['total_emissions'] += emission  # Track only base emissions
+            return vested_amount
         
-        return total_emission
-    
-    def _process_emission(self) -> None:
-        emission = self._calculate_emission()
-        self.state.total_supply += emission
-        
-        print(f"\nEpoch {self.state.epoch} Emission Distribution:")
-        print(f"Total Emission: {emission:.4f}")
-        
-        total_votes = sum(pod.votes for pod in self.state.pods.values())
-        if total_votes == 0:
-            emissions_per_pod = emission / len(self.state.pods)
-            print("No votes - distributing emissions equally")
-            for pod in self.state.pods.values():
-                pod.emissions = emissions_per_pod
-        else:
-            print("Vote-weighted emission distribution:")
-            for name, pod in self.state.pods.items():
-                pod.emissions = emission * (pod.votes / total_votes)
-                print(f"  {name}: {pod.emissions:.4f} (votes: {pod.votes:.4f})")
+        return market_adjusted_emission
     
     def _process_fees(self) -> None:
         print(f"\nEpoch {self.state.epoch} Fee Processing:")
@@ -373,6 +307,10 @@ class VeTokenomicsSimulation:
     #         pod.update_metrics()
     
     def _record_state(self) -> None:
+        metrics = self.state.metrics.copy()
+        if self.vesting_manager:
+            metrics['unvested_emissions'] = self.vesting_manager.remaining_tokens(self.state.epoch)
+        
         self.history.append({
             'epoch': self.state.epoch,
             'total_supply': self.state.total_supply,
@@ -493,6 +431,31 @@ class VeTokenomicsSimulation:
                 pod.emission_multiplier = 0.75
             else:
                 pod.emission_multiplier = 1.00  # Graduated
+
+
+    def _process_emission(self) -> None:
+        emission = self._calculate_emission()
+        self.state.total_supply += emission
+        
+        # Clean up completed vesting schedules
+        if self.vesting_manager:
+            self.vesting_manager.cleanup_completed(self.state.epoch)
+
+        # Track the emission amount in metrics
+        self.state.metrics['emissions_this_epoch'] = emission
+        
+        # Distribute the vested/released emissions to pods
+        total_votes = sum(pod.votes for pod in self.state.pods.values())
+        if total_votes == 0:
+            emissions_per_pod = emission / len(self.state.pods)
+            print("No votes - distributing emissions equally")
+            for pod in self.state.pods.values():
+                pod.emissions = emissions_per_pod
+        else:
+            print("Vote-weighted emission distribution:")
+            for name, pod in self.state.pods.items():
+                pod.emissions = emission * (pod.votes / total_votes)
+                print(f"  {name}: {pod.emissions:.4f} (votes: {pod.votes:.4f})")
 
     def _process_events(self) -> None:
         current_events = [e for e in self.events if e.epoch == self.state.epoch]
