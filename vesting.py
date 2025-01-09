@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import List
+
 class VestingSchedule(ABC):
     def __init__(self, initial_amount: float, start_epoch: int) -> None:
         if initial_amount <= 0:

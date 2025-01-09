@@ -1,3 +1,3 @@
 #! /bin/bash
 
-streamlit run scripts/app.py --server.headless true
+streamlit run Reppo.py --server.headless true
