@@ -3,7 +3,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 import numpy as np
 from numpy.random import Generator, PCG64
-# from reppo.vesting import VestingSchedule, VestingManager
 from vesting import VestingSchedule, VestingManager
 from collections import defaultdict
 
@@ -48,71 +47,72 @@ class SystemState:
         self.ve_tokens = 0.0
         self.lock_positions: List[LockPosition] = []
 
-        # Initialize pods with equal vote share
         initial_vote_share = 1.0 / len(params.initial_pods)
-        print(f"\nInitializing pods with vote share: {initial_vote_share}")
         
         self.pods: Dict[str, PodState] = {
             pod: PodState(0.0, 1.0 / len(params.initial_pods), 0.0, params.base_fee_drift)
             for pod in params.initial_pods
         }
-        print("\nInitial Pod States:")
-        for name, pod in self.pods.items():
-            print(f"{name}:")
-            print(f"  Votes: {pod.votes:.4f}")
-            print(f"  Fee Drift: {pod.fee_drift:.4f}")
 
         self.market_state = params.market
         self.metrics = {
             'avg_lock_duration': 0.0,
-            'total_fees': 0.0,
-            'total_fcus': 0.0,
-            'vote_entropy': 0.0,
             'active_positions': 0,
-            'emissions_this_epoch': 0.0,
-            'total_emissions': 0.0,
-            'total_vested': 0.0,
-            'unvested_emissions': 0.0,
-            'raw_emissions_this_epoch': 0.0,
+            'vote_entropy': 0.0,
+            
+            'emissions': {
+                'current': 0.0,  # Emissions in current epoch
+                'total': 0.0,    # Cumulative emissions
+                'vested': 0.0,   # Only used with VestingManager
+                'unvested': 0.0  # Only used with VestingManager
+            },
+            'pods': {}
         }
-    
+
     def update_metrics(self) -> None:
         active_positions = [p for p in self.lock_positions if not p.is_expired(self.epoch)]
         if active_positions:
-            self.metrics['avg_lock_duration'] = np.mean([p.duration for p in active_positions])
+            self.metrics['avg_lock_duration'] = float(np.mean([p.duration for p in active_positions]))
             self.metrics['active_positions'] = len(active_positions)
         
-        self.metrics['total_fees'] = sum(pod.total_fees for pod in self.pods.values())
-        self.metrics['total_fcus'] = sum(pod.total_fcus for pod in self.pods.values())
+        pod_metrics = {}
+        for name, pod in self.pods.items():
+            active_claims = getattr(pod, 'active_claims', [])
+            serializable_claims = len(active_claims)
+
+            pod_metrics[name] = {
+                'emissions': {
+                    'current': pod.emissions,
+                    'total': pod.total_emissions
+                },
+                'fees': {
+                    'current': pod.fees,
+                    'total': pod.total_fees,
+                    'distributed': pod.fees * pod.fee_split
+                },
+                'fcus': {
+                    'current': pod.fcus,
+                    'total': pod.total_fcus,
+                    'active': serializable_claims 
+                },
+                'votes': {
+                    'current': pod.votes,
+                    'peak': pod.peak_votes,
+                    'min': pod.min_votes,
+                    'avg': pod.avg_vote_share
+                },
+                'efficiency': {
+                    'fee_rate': float(pod.fees / max(pod.votes, 0.0001)),
+                    'fcu_rate': float(pod.fcus / max(pod.fees, 0.0001))
+                }
+            }
+        
+        self.metrics['pods'] = pod_metrics
         
         votes = np.array([pod.votes for pod in self.pods.values()])
         votes = votes[votes > 0]
         if len(votes) > 0:
-            self.metrics['vote_entropy'] = -np.sum(votes * np.log(votes))
-            
-        # Track pod-specific metrics
-        self.metrics['pod_emissions'] = {name: pod.emissions for name, pod in self.pods.items()}
-        self.metrics['total_pod_emissions'] = {name: pod.total_emissions for name, pod in self.pods.items()}
-        
-        # Current epoch metrics
-        self.metrics['pod_fees'] = {name: pod.fees for name, pod in self.pods.items()}
-        self.metrics['pod_fcus'] = {name: pod.fcus for name, pod in self.pods.items()}
-        self.metrics['vote_distribution'] = {name: pod.votes for name, pod in self.pods.items()}
-        
-        # Historical aggregates
-        self.metrics['cumulative_pod_fees'] = {name: pod.total_fees for name, pod in self.pods.items()}
-        self.metrics['cumulative_pod_fcus'] = {name: pod.total_fcus for name, pod in self.pods.items()}
-        self.metrics['avg_vote_share'] = {name: pod.avg_vote_share for name, pod in self.pods.items()}
-        
-        # Performance metrics
-        self.metrics['fee_generation_rate'] = {
-            name: pod.fees / max(pod.votes, 0.0001) 
-            for name, pod in self.pods.items()
-        }
-        self.metrics['fcu_efficiency'] = {
-            name: pod.fcus / max(pod.fees, 0.0001) 
-            for name, pod in self.pods.items()
-        }
+            self.metrics['vote_entropy'] = float(-np.sum(votes * np.log(votes)))
         
     def get_total_fees(self) -> float:
         return sum(pod.fees for pod in self.pods.values())
@@ -131,6 +131,7 @@ class PodState:
     fee_drift: float
     emissions: float = 0.0  # emissions received by pod
     fee_split: float = 0.7  # αp - fraction of fees distributed to FCU holders
+    fcu_generation_rate: float = 1.0  # controls FCU generation 
     
     # Historical metrics
     total_fees: float = 0.0
@@ -172,7 +173,7 @@ class SimulationParams:
 
     fcu_duration: int  # τ in the paper - how long FCUs last
     fcu_delay: Dict[str, int]  # δp for each pod - delay before FCUs activate
-
+    pod_fcu_rates: Dict[str, float]  # FCU generation rates per pod
 
     # vesting: Optional[VestingSchedule] = None
     emission_schedule: Optional[Callable[[SystemState], float]] = None
@@ -212,7 +213,6 @@ class LockPosition:
             raise ValueError("New duration must be greater than current duration")
         self.duration = new_duration
 
-# TODO: emissions vesting!
 class VeTokenomicsSimulation:
     def __init__(self, params: SimulationParams):
         self.params = params
@@ -255,9 +255,6 @@ class VeTokenomicsSimulation:
         self._update_votes()
         self._generate_fcus()
         self._update_ve_tokens()
-        
-        # stability = self.check_system_stability()
-        # self.state.metrics['stability'] = stability
         
         self.state.update_metrics()
         self._record_state()
@@ -425,23 +422,24 @@ class VeTokenomicsSimulation:
         })
 
     def _calculate_emission(self) -> float:
-        if self.params.emission_schedule:
-            base_emission = self.params.emission_schedule(self.state)
-        else:
+        if not self.params.emission_schedule:
             raise ValueError("Emission schedule not provided")
-            
-        market_factor = self.state.market_state.get_market_factor()
-        market_adjusted_emission = base_emission * market_factor
+                
+        base_emission = self.params.emission_schedule(self.state)
+        market_adjusted_emission = base_emission * self.state.market_state.get_market_factor()
         
-        # Track the raw emission before vesting
-        self.state.metrics['raw_emissions_this_epoch'] = market_adjusted_emission
-        self.state.metrics['total_emissions'] += market_adjusted_emission
+        # Update emissions metrics
+        self.state.metrics['emissions']['current'] = market_adjusted_emission
+        self.state.metrics['emissions']['total'] += market_adjusted_emission
         
-        # Handle vesting
+        # Handle vesting if enabled
         if self.vesting_manager:
             self.vesting_manager.add_emission(market_adjusted_emission, self.state.epoch)
             vested_amount = self.vesting_manager.tokens_to_release(self.state.epoch)
-            self.state.metrics['total_vested'] += vested_amount
+            self.state.metrics['emissions']['vested'] += vested_amount
+            self.state.metrics['emissions']['unvested'] = (
+                self.vesting_manager.remaining_tokens(self.state.epoch)
+            )
             return vested_amount
         
         return market_adjusted_emission
@@ -469,7 +467,8 @@ class VeTokenomicsSimulation:
     
     def _generate_fcus(self) -> None:
         for pod in self.state.pods.values():
-            pod.fcus += self.params.omega * pod.fees * pod.votes
+            new_fcus = pod.fcu_generation_rate * pod.votes
+            pod.fcus += float(new_fcus)
 
         # Generate individual FCU claims for stakers
         for i, position in enumerate(self.state.lock_positions):
@@ -481,7 +480,7 @@ class VeTokenomicsSimulation:
             # Calculate FCUs earned for each pod based on vote allocation
             for pod_name, pod in self.state.pods.items():
                 vote_share = pod.votes * ve_power / self.state.ve_tokens
-                fcu_amount = self.params.omega * pod.fees * vote_share
+                fcu_amount = pod.fcu_generation_rate * vote_share
                 
                 if fcu_amount > 0:
                     activation_epoch = (
@@ -526,21 +525,8 @@ class VeTokenomicsSimulation:
             'total_supply': self.state.total_supply,
             'locked_tokens': self.state.locked_tokens,
             've_tokens': self.state.ve_tokens,
-            'metrics': self.state.metrics.copy(),
             'market_rate': self.state.market_state.base_fee_rate,
-            'emissions_this_epoch': self.state.metrics['emissions_this_epoch'],
-            'total_emissions': self.state.metrics['total_emissions'],
-            'total_vested': self.state.metrics['total_vested'],
-            'pod_emissions': self.state.metrics['pod_emissions'],
-            'total_pod_emissions': self.state.metrics['total_pod_emissions'],
-            'pod_fees': self.state.metrics['pod_fees'],
-            'pod_fcus': self.state.metrics['pod_fcus'],
-            'vote_distribution': self.state.metrics['vote_distribution'],
-            'total_fees': self.state.metrics['total_fees'],
-            'total_fcus': self.state.metrics['total_fcus'],
-            'avg_lock_duration': self.state.metrics['avg_lock_duration'],
-            'active_positions': self.state.metrics['active_positions'],
-            'vote_entropy': self.state.metrics['vote_entropy']
+            'metrics': self.state.metrics.copy(),  # Now contains all metrics in organized structure
         })
 
     def _check_pod_performance(self) -> None:
@@ -573,8 +559,8 @@ class VeTokenomicsSimulation:
         if self.vesting_manager:
             self.vesting_manager.cleanup_completed(self.state.epoch)
 
-        # Track the emission amount in metrics
-        self.state.metrics['emissions_this_epoch'] = emission
+        # Track the emission amount in new metrics structure
+        self.state.metrics['emissions']['current'] = emission
         
         # Distribute the vested/released emissions to pods
         total_votes = sum(pod.votes for pod in self.state.pods.values())
@@ -705,3 +691,50 @@ class VeTokenomicsSimulation:
         
     #     self.state._prev_locked_tokens = self.state.locked_tokens
     #     return stability
+
+@dataclass 
+class StakingConfig:
+    amount_per_epoch: float
+    duration: int
+    
+@dataclass
+class PodConfig:
+    fee_growth: float  # Fixed fee growth per epoch
+    initial_vote_share: float
+
+@dataclass
+class DeterministicConfig:
+    staking: StakingConfig
+    pods: Dict[str, PodConfig]
+    market_growth: float  # Fixed market growth per epoch
+
+class DeterministicSimulation(VeTokenomicsSimulation):
+    def __init__(self, params: SimulationParams, det_config: DeterministicConfig):
+        super().__init__(params)
+        self.det_config = det_config
+        
+        # Initialize pod vote shares
+        for pod_name, pod in self.state.pods.items():
+            pod.votes = self.det_config.pods[pod_name].initial_vote_share
+        
+    def _simulate_market(self) -> None:
+        self.state.market_state.base_fee_rate *= (1 + self.det_config.market_growth)
+    
+    def _simulate_staking(self) -> None:
+        try:
+            self.create_lock(
+                self.det_config.staking.amount_per_epoch,
+                self.det_config.staking.duration
+            )
+        except ValueError:
+            pass
+    
+    def _process_fees(self) -> None:
+        market_rate = self.state.market_state.base_fee_rate
+        
+        for pod_name, pod in self.state.pods.items():
+            pod_config = self.det_config.pods[pod_name]
+            if pod.fees == 0:
+                pod.fees = 1  # seed
+            pod.fees *= (1 + pod_config.fee_growth)
+            pod.update_metrics()

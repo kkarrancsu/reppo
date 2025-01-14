@@ -6,6 +6,10 @@ from vetoken import (
     VeTokenomicsSimulation,
     SimulationParams,
     MarketState,
+    DeterministicConfig,
+    StakingConfig,
+    PodConfig,
+    DeterministicSimulation
 )
 from vesting import (
     VestingSchedule,
@@ -17,6 +21,12 @@ st.set_page_config(layout="wide")
 
 def create_simulation_inputs():
     st.sidebar.header("Simulation Parameters")
+
+    st.sidebar.header("Simulation Mode")
+    simulation_type = st.sidebar.radio(
+        "Select Simulation Type",
+        ["Stochastic", "Deterministic"]
+    )
     
     with st.sidebar.expander("Protocol Parameters"):
         gamma = st.slider(
@@ -45,12 +55,6 @@ def create_simulation_inputs():
         )
     
     with st.sidebar.expander("Pod Parameters"):
-        base_fee_drift = st.slider(
-            "Base Fee Drift", 
-            0.0, 0.2, 0.05, 0.01,
-            help="Base rate at which pods generate fees. "
-                 "This is modified by votes and market conditions."
-        )
         max_lock_duration = st.number_input(
             "Max Lock Duration", 
             value=52, 
@@ -72,6 +76,30 @@ def create_simulation_inputs():
             help="Number of pods to simulate. Each pod represents a unit of intelligence "
                  "that can generate fees and receive vote allocations."
         )
+        if simulation_type == "Stochastic":
+            base_fee_drift = st.slider("Base Fee Drift", 0.0, 0.2, 0.05, 0.01)
+        else:
+            pod_configs = []
+            for i in range(num_pods):
+                st.write(f"\nPod {i+1} Configuration")
+                # fee_growth = st.slider(
+                #     f"Fee Growth Rate (Pod {i+1})",
+                #     0.0, 0.2, 0.05, 0.01
+                # )
+                # initial_vote = st.slider(
+                #     f"Initial Vote Share (Pod {i+1})",
+                #     0.0, 1.0, 1.0/num_pods, 0.01
+                # )
+                fee_growth = 0.05 if i == 0 else 0.25  # just for testing
+                initial_vote = 0.25 if i == 0 else 0.75  # just for testing
+                # pod_fcu_rates[f"pod{i+1}"] = st.slider(
+                #     f"FCU Generation Rate (Pod {i+1})",
+                #     0.0, 1.0, 0.1, 0.01
+                # )
+                pod_configs.append({
+                    "fee_growth": fee_growth,
+                    "initial_vote_share": initial_vote
+                })
     
     with st.sidebar.expander("Market Parameters"):
         base_fee_rate = st.slider(
@@ -80,18 +108,32 @@ def create_simulation_inputs():
             help="Base market rate for fee generation. "
                  "This represents the overall market activity level."
         )
-        growth_rate = st.slider(
-            "Growth Rate", 
-            -0.2, 0.2, 0.05, 0.01,
-            help="Market growth rate (can be negative). "
-                 "Affects how the base fee rate evolves over time."
-        )
-        volatility = st.slider(
-            "Volatility", 
-            0.0, 0.5, 0.2, 0.01,
-            help="Market volatility. Higher values create more random variation "
-                 "in fee generation and market conditions."
-        )
+        if simulation_type == "Stochastic":
+            growth_rate = st.slider(
+                "Growth Rate", 
+                -0.2, 0.2, 0.05, 0.01,
+                help="Market growth rate (can be negative). "
+                    "Affects how the base fee rate evolves over time."
+            )
+            volatility = st.slider(
+                "Volatility", 
+                0.0, 0.5, 0.2, 0.01,
+                help="Market volatility. Higher values create more random variation "
+                    "in fee generation and market conditions."
+            )
+        else:
+            base_stake_rate = 0.0
+            fixed_stake_amount = st.number_input(
+                "Fixed Stake Amount per Epoch",
+                value=1000,
+                step=100
+            )
+            fixed_stake_duration = st.number_input(
+                "Fixed Stake Duration",
+                value=10,
+                min_value=1,
+                max_value=max_lock_duration
+            )
     
     with st.sidebar.expander("General Parameters"):
         base_stake_rate = st.slider(
@@ -108,8 +150,8 @@ def create_simulation_inputs():
         )
         epochs = st.number_input(
             "Epochs to Simulate", 
-            value=120, 
-            step=10,
+            value=10, 
+            step=1,
             help="Number of time periods to simulate. Each epoch represents "
                  "a discrete time step where system state is updated."
         )
@@ -145,6 +187,7 @@ def create_simulation_inputs():
             )
 
     return {
+        "simulation_type": simulation_type,
         "protocol": {
             "gamma": gamma,
             "alpha": alpha,
@@ -152,18 +195,19 @@ def create_simulation_inputs():
             "omega": omega,
         },
         "pods": {
-            "base_fee_drift": base_fee_drift,
+            "num_pods": num_pods,
             "max_lock_duration": max_lock_duration,
             "min_lock_duration": min_lock_duration,
-            "num_pods": num_pods
+            "base_fee_drift": base_fee_drift if simulation_type == "Stochastic" else 0.0,
+            "pod_configs": pod_configs if simulation_type == "Deterministic" else None,
+            
         },
         "market": MarketState(
             base_fee_rate=base_fee_rate,
-            growth_rate=growth_rate,
-            volatility=volatility
+            growth_rate=growth_rate if simulation_type == "Stochastic" else 0.0,
+            volatility=volatility if simulation_type == "Stochastic" else 0.0
         ),
         "general": {
-            "base_stake_rate": base_stake_rate,
             "initial_token_supply": initial_token_supply,
             "epochs": epochs
         },
@@ -171,38 +215,61 @@ def create_simulation_inputs():
             "initial_rate": initial_emission,
             "decay_rate": decay_rate,
             "vesting_duration": vesting_duration
+        },
+        "staking": {
+            "base_stake_rate": base_stake_rate,
+            "fixed_amount": fixed_stake_amount if simulation_type == "Deterministic" else 0.0,
+            "fixed_duration": fixed_stake_duration if simulation_type == "Deterministic" else 0.0
         }
     }
 
-def create_simulation(inputs):
+def create_simulation(config):
     def emission_schedule(state):
-        return inputs["emissions"]["initial_rate"] * (
-            (1 - inputs["emissions"]["decay_rate"]) ** state.epoch
+        return config["emissions"]["initial_rate"] * (
+            (1 - config["emissions"]["decay_rate"]) ** state.epoch
         )
     
-    initial_pods = [f"pod{i+1}" for i in range(inputs["pods"]["num_pods"])]
+    initial_pods = [f"pod{i+1}" for i in range(config["pods"]["num_pods"])]
     params = SimulationParams(
-        gamma=inputs["protocol"]["gamma"],
-        alpha=inputs["protocol"]["alpha"],
-        delta=inputs["protocol"]["delta"],
-        omega=inputs["protocol"]["omega"],
+        gamma=config["protocol"]["gamma"],
+        alpha=config["protocol"]["alpha"],
+        delta=config["protocol"]["delta"],
+        omega=config["protocol"]["omega"],
         fee_volatility=0.1,
-        base_stake_rate=inputs["general"]["base_stake_rate"],
-        base_fee_drift=inputs["pods"]["base_fee_drift"],
-        max_lock_duration=inputs["pods"]["max_lock_duration"],
-        min_lock_duration=inputs["pods"]["min_lock_duration"],
+        base_stake_rate=config["staking"]["base_stake_rate"],
+        base_fee_drift=config["pods"]["base_fee_drift"],
+        max_lock_duration=config["pods"]["max_lock_duration"],
+        min_lock_duration=config["pods"]["min_lock_duration"],
         initial_pods=initial_pods,
-        initial_token_supply=inputs["general"]["initial_token_supply"],
-        epochs=inputs["general"]["epochs"],
-        market=inputs["market"],
-        emission_vesting_duration=inputs["emissions"].get("vesting_duration", None),
+        initial_token_supply=config["general"]["initial_token_supply"],
+        epochs=config["general"]["epochs"],
+        market=config["market"],
+        emission_vesting_duration=config["emissions"].get("vesting_duration", None),
         emission_schedule=emission_schedule,
         # TODO: these should be configurable
         fcu_duration=10,
         fcu_delay={pod: 0 for pod in initial_pods},
+        pod_fcu_rates={pod: 1.0 for pod in initial_pods}  # TODO: make this configurable
     )
     
-    return VeTokenomicsSimulation(params)
+    if config["simulation_type"] == "Deterministic":
+        det_config = DeterministicConfig(
+            staking=StakingConfig(
+                amount_per_epoch=config["staking"]["fixed_amount"],
+                duration=config["staking"]["fixed_duration"]
+            ),
+            pods={
+                pod: PodConfig(
+                    fee_growth=pod_cfg["fee_growth"],
+                    initial_vote_share=pod_cfg["initial_vote_share"]
+                )
+                for pod, pod_cfg in zip(initial_pods, config["pods"]["pod_configs"])
+            },
+            market_growth=config["market"].growth_rate
+        )
+        return DeterministicSimulation(params, det_config)
+    else:
+        return VeTokenomicsSimulation(params)
 
 def create_pod_metrics_tab(history):
     st.header("Pod Performance Metrics")
@@ -213,33 +280,33 @@ def create_pod_metrics_tab(history):
     pod_data = []
     for epoch_data in history:
         metrics = epoch_data['metrics']
-        total_epoch_emissions = metrics.get('emissions_this_epoch', 0)
+        current_emissions = metrics['emissions']['current']
+        total_emissions = metrics['emissions']['total']
+        vested_emissions = metrics['emissions'].get('vested', 0)  # Optional
+        unvested_emissions = metrics['emissions'].get('unvested', 0)  # Optional
         
-        for pod_name, emissions in epoch_data['pod_emissions'].items():
-            pod_fee_metrics = metrics.get('pod_fee_metrics', {}).get(pod_name, {})
+        for pod_name, pod_metrics in metrics['pods'].items():
             pod_data.append({
                 'epoch': epoch_data['epoch'],
                 'pod': pod_name,
-                'emissions': emissions,
-                'total_epoch_emissions': total_epoch_emissions,  # Add total emissions
-                'votes': metrics.get('vote_distribution', {}).get(pod_name, 0),
-                'fees': metrics.get('pod_fees', {}).get(pod_name, 0),
-                'fcus': metrics.get('pod_fcus', {}).get(pod_name, 0),
-                'cumulative_fees': metrics.get('cumulative_pod_fees', {}).get(pod_name, 0),
-                'cumulative_fcus': metrics.get('cumulative_pod_fcus', {}).get(pod_name, 0),
-                'fee_rate': metrics.get('fee_generation_rate', {}).get(pod_name, 0),
-                'fcu_efficiency': metrics.get('fcu_efficiency', {}).get(pod_name, 0),
-                'avg_vote_share': metrics.get('avg_vote_share', {}).get(pod_name, 0),
-                'active_fcus': pod_fee_metrics.get('active_fcus', 0),
-                'distributed_fees': pod_fee_metrics.get('distributed_fees', 0),
-                'avg_fee_per_fcu': pod_fee_metrics.get('avg_fee_per_fcu', 0),
-                'fee_distribution_ratio': pod_fee_metrics.get('fee_distribution_ratio', 0)
+                'emissions': pod_metrics['emissions']['current'],
+                'cumulative_emissions': pod_metrics['emissions']['total'],
+                'system_emissions': current_emissions,
+                'system_total_emissions': total_emissions,
+                'vested_emissions': vested_emissions,
+                'unvested_emissions': unvested_emissions,
+                'votes': pod_metrics['votes']['current'],
+                'fees': pod_metrics['fees']['current'],
+                'fcus': pod_metrics['fcus']['current'],
+                'cumulative_fees': pod_metrics['fees']['total'],
+                'cumulative_fcus': pod_metrics['fcus']['total'],
+                'fee_rate': pod_metrics['efficiency']['fee_rate'],
+                'fcu_efficiency': pod_metrics['efficiency']['fcu_rate'],
+                'active_fcus': pod_metrics['fcus']['active'],
+                'distributed_fees': pod_metrics['fees']['distributed']
             })
     
     pod_df = pd.DataFrame(pod_data)
-    
-    # Create a separate DataFrame for total emissions
-    total_emissions_df = pod_df.groupby('epoch')[['total_epoch_emissions']].first().reset_index()
     
     col1, col2 = st.columns(2)
     
@@ -272,29 +339,27 @@ def create_pod_metrics_tab(history):
         tabs = st.tabs(["Current", "Cumulative", "Efficiency", "Fee Distribution"])
         
         with tabs[0]:
-            # Base Pod Emissions Chart
-            emissions_chart = alt.Chart(pod_df).mark_line().encode(
-                x=alt.X('epoch:Q', title='Epoch'),
-                y=alt.Y('emissions:Q', title='Emissions'),
+            # Pod Emissions with System Total
+            base_emissions = alt.Chart(pod_df).mark_line().encode(
+                x='epoch:Q',
+                y='emissions:Q',
                 color=alt.Color('pod:N', title='Pod')
             )
             
-            # Total Emissions Line
-            total_emissions_line = alt.Chart(total_emissions_df).mark_line(
-                strokeDash=[5, 5],  # Create a dashed line
+            system_emissions = alt.Chart(pod_df.groupby('epoch')['system_emissions'].first().reset_index()).mark_line(
+                strokeDash=[5, 5],
                 color='red'
             ).encode(
                 x='epoch:Q',
-                y='total_epoch_emissions:Q'
+                y='system_emissions:Q'
             )
             
-            # Combine the charts
-            combined_emissions = (emissions_chart + total_emissions_line).properties(
-                title='Pod Emissions (Red Dashed = Total Epoch Emissions)',
+            emissions_chart = (base_emissions + system_emissions).properties(
+                title='Pod Emissions (Red Dashed = Total System Emissions)',
                 width=400,
                 height=300
             )
-            st.altair_chart(combined_emissions, use_container_width=True)
+            st.altair_chart(emissions_chart, use_container_width=True)
             
             # FCUs Chart
             fcus_chart = alt.Chart(pod_df).mark_line().encode(
@@ -308,8 +373,45 @@ def create_pod_metrics_tab(history):
             )
             st.altair_chart(fcus_chart, use_container_width=True)
             
-        # Rest of the tabs remain the same
         with tabs[1]:
+            # Cumulative Pod Emissions with System Total
+            base_cum_emissions = alt.Chart(pod_df).mark_line().encode(
+                x='epoch:Q',
+                y='cumulative_emissions:Q',
+                color=alt.Color('pod:N', title='Pod')
+            )
+            
+            system_cum_emissions = alt.Chart(pod_df.groupby('epoch')['system_total_emissions'].first().reset_index()).mark_line(
+                strokeDash=[5, 5],
+                color='red'
+            ).encode(
+                x='epoch:Q',
+                y='system_total_emissions:Q'
+            )
+            
+            if 'vested_emissions' in pod_df.columns:
+                vested_emissions = alt.Chart(pod_df.groupby('epoch')['vested_emissions'].first().reset_index()).mark_line(
+                    strokeDash=[2, 2],
+                    color='green'
+                ).encode(
+                    x='epoch:Q',
+                    y='vested_emissions:Q'
+                )
+                cum_emissions_chart = (base_cum_emissions + system_cum_emissions + vested_emissions).properties(
+                    title='Cumulative Pod Emissions (Red = System Total, Green = Vested)',
+                    width=400,
+                    height=300
+                )
+            else:
+                cum_emissions_chart = (base_cum_emissions + system_cum_emissions).properties(
+                    title='Cumulative Pod Emissions (Red Dashed = System Total)',
+                    width=400,
+                    height=300
+                )
+            
+            # st.altair_chart(cum_emissions_chart, use_container_width=True)
+            st.altair_chart(base_cum_emissions + system_cum_emissions, use_container_width=True)
+            
             # Cumulative Fees
             cum_fees_chart = alt.Chart(pod_df).mark_line().encode(
                 x=alt.X('epoch:Q', title='Epoch'),
@@ -321,19 +423,6 @@ def create_pod_metrics_tab(history):
                 height=300
             )
             st.altair_chart(cum_fees_chart, use_container_width=True)
-            
-            # Cumulative FCUs
-            cum_fcus_chart = alt.Chart(pod_df).mark_line().encode(
-                x=alt.X('epoch:Q', title='Epoch'),
-                y=alt.Y('cumulative_fcus:Q', title='Total FCUs'),
-                color=alt.Color('pod:N', title='Pod')
-            ).properties(
-                title='Cumulative Pod FCUs',
-                width=400,
-                height=300
-            )
-            st.altair_chart(cum_fcus_chart, use_container_width=True)
-            
         with tabs[2]:
             # Fee Generation Rate
             fee_rate_chart = alt.Chart(pod_df).mark_line().encode(
@@ -421,7 +510,10 @@ def create_macro_metrics_tab(history):
     
     # Calculate derived metrics
     df['tvl'] = df['locked_tokens']
-    df['fee_efficiency'] = df['metrics'].apply(lambda x: x['total_fees']) / df['tvl'].where(df['tvl'] > 0, 1)
+    # Calculate total fees across all pods
+    df['fee_efficiency'] = df['metrics'].apply(
+        lambda x: sum(pod['fees']['total'] for pod in x['pods'].values())
+    ) / df['tvl'].where(df['tvl'] > 0, 1)
     
     col1, col2 = st.columns(2)
     
@@ -482,37 +574,13 @@ def create_market_metrics_tab(history):
     
     col1, col2 = st.columns(2)
     
-    with col1:
-        # Market Rate
-        market_chart = alt.Chart(df).mark_line().encode(
-            x=alt.X('epoch:Q', title='Epoch'),
-            y=alt.Y('market_rate:Q', title='Rate'),
-        ).properties(
-            title='Market Base Fee Rate',
-            width=400,
-            height=300
-        )
-        st.altair_chart(market_chart, use_container_width=True)
-        
-        # Vote Entropy (Decentralization)
-        entropy_chart = alt.Chart(df).mark_line().encode(
-            x=alt.X('epoch:Q', title='Epoch'),
-            y=alt.Y('metrics.vote_entropy:Q', title='Entropy'),
-        ).properties(
-            title='Vote Distribution Entropy',
-            width=400,
-            height=300
-        )
-        st.altair_chart(entropy_chart, use_container_width=True)
-    
     with col2:
-        # Prepare data for emissions vs fees comparison
         comparison_df = pd.DataFrame({
             'epoch': df['epoch'],
-            'Total Fees': df['metrics'].apply(lambda x: x['total_fees']),
-            'Total Emissions': df['metrics'].apply(lambda x: x['total_emissions']),
-            'Vested Emissions': df['metrics'].apply(lambda x: x['total_vested']),
-            'Unvested Emissions': df['metrics'].apply(lambda x: x.get('unvested_emissions', 0))
+            'Total Fees': df['metrics'].apply(lambda x: x['pods'].get('total_fees', 0)),
+            'Total Emissions': df['metrics'].apply(lambda x: x['emissions']['total']),
+            'Vested Emissions': df['metrics'].apply(lambda x: x['emissions']['vested']),
+            'Unvested Emissions': df['metrics'].apply(lambda x: x['emissions']['unvested'])
         }).melt(
             id_vars=['epoch'],
             value_vars=['Total Fees', 'Total Emissions', 'Vested Emissions', 'Unvested Emissions'],
@@ -520,27 +588,14 @@ def create_market_metrics_tab(history):
             value_name='value'
         )
         
-        comparison_chart = alt.Chart(comparison_df).mark_line().encode(
-            x=alt.X('epoch:Q', title='Epoch'),
-            y=alt.Y('value:Q', title='Amount'),
-            color=alt.Color('metric:N', title='Metric')
-        ).properties(
-            title='Total Emissions vs Fees Generated',
-            width=400,
-            height=300
-        )
-        st.altair_chart(comparison_chart, use_container_width=True)
-        
-        # Vesting Progress
         vesting_chart = alt.Chart(df).mark_line().encode(
             x=alt.X('epoch:Q', title='Epoch'),
-            y=alt.Y('metrics.total_vested:Q', title='Amount'),
+            y=alt.Y('metrics.emissions.vested:Q', title='Amount'),
         ).properties(
             title='Cumulative Vested Tokens',
             width=400,
             height=300
         )
-        st.altair_chart(vesting_chart, use_container_width=True)
 
 def check_password():
     if "authenticated" not in st.session_state:
@@ -564,8 +619,7 @@ def check_password():
         st.stop()
 
 def main():
-    check_password()
-
+    # check_password()
     st.title("VeTokenomics Simulation")
     
     inputs = create_simulation_inputs()
