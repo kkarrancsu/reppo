@@ -18,9 +18,9 @@ This simulation models a veTokenomics system where users can lock tokens to gain
 - **FCUs (Fee Claim Units)**: Claims on future pod fees, earned based on vote allocation
 
 ### 2. Staking Dynamics
-The simulation models user staking behavior through:
 
-- **Staking Rate**: Follows a Poisson process with rate λ(t) influenced by:
+For the stochastic simualtion, staking behavior is modeled as a Poisson process with rate λ(t) influenced by:
+- **Staking Rate**: 
   - Current returns (r(t))
   - Market conditions (m(t))
   - Recent performance (p(t))
@@ -31,9 +31,10 @@ The simulation models user staking behavior through:
   - Longer durations more likely when returns are higher
   - γ parameter controls non-linearity of this relationship
 
-### 3. Pod Performance
-Each pod generates fees based on:
+For the deterministic simulation, staking rate is a constant that is set by the user.
 
+### 3. Pod Performance
+For the stochastic simulation, pod performance is modeled as a geometric Brownian motion with drift and volatility:
 - **Base Fee Generation**:
   - dF_p = μ_p * dt + σ_p * dW_t
   - μ_p = fee_drift * votes * market_rate
@@ -44,6 +45,9 @@ Each pod generates fees based on:
   - Incorporates both performance chasing (α) and diversification (δ)
   - V_p ~ Dirichlet(α * F_p/F_total + δ)
 
+For the deterministic simulation, pod performance is not computed directy, but the user configures
+a constant growth rate of fees that the pod generates.
+
 ### 4. FCU Mechanics
 FCUs represent claims on future pod fees:
 
@@ -52,7 +56,12 @@ FCUs represent claims on future pod fees:
 - **Duration**: Active for τ epochs once activated
 - **Fee Distribution**: Pro-rata share of pod's distributable fees
 
+NOTE: the simulation currently expires FCUs, but we have decided to remove this feature.  This is an update that needs to be made, but will simplify the simulation.
+
 ## Simulation Description
+
+### Data Structures
+The following data structures are useful to help understand the simulation:
 
 LockState (tracks a lock position - i.e. stake)
             
@@ -97,20 +106,24 @@ SimulationParams (simulation configuration)
     - initial_supply: Starting token supply
     - emission_schedule: Token emission rate over time
             
-Simulation Flow
+### Simulation Flow
+The simulation runs in a loop and is an event based simulator.  Events are things such as token emissions, FCU activations, lock expirations, etc. The events
+trigger at a given epoch, and the simulation simply executes the events in time-order.  Events can trigger new events, thereby continuing the simulation for
+a set period of of time.
+            
+For each epoch, the following steps are taken:
 
 1. **Process Events**
    - Emission distributions
    - FCU activations
-   - Lock expirations  [TODO: remove this]
+   - Lock expirations (i.e. veReppo ==> Reppo)
 
 2. **Market Update**
-   - Updates base fee rate with growth and volatility
-   - Affects pod fee generation capacity
+   - Updates base fee rate with growth and volatility (in stochastic simulation)
 
 3. **Staking**
-   - Generates new staking events
-   - Assigns lock durations
+   - Generates new staking events (in both stochastic and deterministic simulations)
+   - Assigns lock durations (in stochastic simulation)
    - Updates veToken power
 
 4. **Fee Generation**
@@ -121,6 +134,7 @@ Simulation Flow
 5. **Vote Reallocation**
    - Updates vote distribution based on performance
    - Applies diversification incentives
+   - TODO: need to add in a parameter on how often this is happening, every N epochs rather than every epoch (current behavior)
 
 6. **FCU Generation**
    - Issues new FCUs based on vote allocation

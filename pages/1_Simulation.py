@@ -619,7 +619,7 @@ def check_password():
         st.stop()
 
 def main():
-    # check_password()
+    check_password()
     st.title("VeTokenomics Simulation")
     
     inputs = create_simulation_inputs()
