@@ -193,6 +193,7 @@ class FCUClaim:
     acquisition_epoch: int  # When earned
     activation_epoch: int   # When claim becomes active (acquisition + δp)
     expiry_epoch: int      # When claim expires (activation + τ)
+
 @dataclass
 class LockPosition:
     amount: float
@@ -444,6 +445,11 @@ class VeTokenomicsSimulation:
         
         return market_adjusted_emission
     
+    # TODO: votes can only be updated with NEW Reppo tokens, which are staked and converted to veReppo
+    #       stakes cannot be updated.  
+    #       Decide how we want to do this - right now, only pods basically accrue new reppo tokens, which can 
+    #       then be used to restake into veReppo.  However, we want to have a notion of "users" voting.  is that
+    #       separate from pods voting, and do we want the simulation to handle both?
     def _update_votes(self) -> None:
         print(f"\nEpoch {self.state.epoch} Vote Update:")
         total_fees = sum(pod.fees for pod in self.state.pods.values())
@@ -465,6 +471,7 @@ class VeTokenomicsSimulation:
             pod.votes = weight
             print(f"{pod_name}: {old_votes:.4f} -> {weight:.4f}")
     
+    # TODO: remove expiration of FCUs.
     def _generate_fcus(self) -> None:
         for pod in self.state.pods.values():
             new_fcus = pod.fcu_generation_rate * pod.votes
@@ -477,7 +484,7 @@ class VeTokenomicsSimulation:
                 
             ve_power = position.ve_power(self.params)
             
-            # Calculate FCUs earned for each pod based on vote allocation
+            # Calculate FCUs earned for each lock position based on vote allocation
             for pod_name, pod in self.state.pods.items():
                 vote_share = pod.votes * ve_power / self.state.ve_tokens
                 fcu_amount = pod.fcu_generation_rate * vote_share

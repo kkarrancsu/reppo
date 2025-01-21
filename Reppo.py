@@ -52,15 +52,57 @@ FCUs represent claims on future pod fees:
 - **Duration**: Active for τ epochs once activated
 - **Fee Distribution**: Pro-rata share of pod's distributable fees
 
-## Simulation Steps
+## Simulation Description
 
-Each epoch, the simulation:
+LockState (tracks a lock position - i.e. stake)
+            
+    - amount: float
+    - duration: float
+    - start_epoch: float
+    - fcu_claims: float
+    - earned_fees: float
+            
+PodState (tracks a Pod)
+            
+    - fees: float
+    - votes: float
+    - fcus: float
+    - fee_drift: Base rate of fee generation
+    - emissions: emissions directed to the pod
+    - fee_split: Portion of fees distributed to FCU holders
+    - fcu_generation_rate: Rate at which FCUs are generated
+            
+MarketState (tracks the market)
+            
+    - base_fee_rate: Underlying rate for fee generation
+    - growth_rate: Market growth trend
+    - volatility: Market uncertainty
+    - total_fees: float
+    - total_fcus: float
+    - total_emissions: float
+    - peak_votes: float
+    - min_votes: float
+    - cumulative_vote_share: float
+    - vote_samples: int
+            
+SimulationParams (simulation configuration)
+            
+    - gamma: Controls veToken power scaling with lock duration
+    - alpha: Weight of performance in vote allocation
+    - delta: Base weight for vote diversification
+    - omega: FCU generation rate
+    - base_rate: Base staking rate
+    - lock_duration_min: Minimum lock duration
+    - lock_duration_max: Maximum lock duration
+    - initial_supply: Starting token supply
+    - emission_schedule: Token emission rate over time
+            
+Simulation Flow
 
 1. **Process Events**
-   - Lock expirations
-   - FCU activations
    - Emission distributions
-   - Performance checks
+   - FCU activations
+   - Lock expirations  [TODO: remove this]
 
 2. **Market Update**
    - Updates base fee rate with growth and volatility
@@ -88,54 +130,4 @@ Each epoch, the simulation:
    - Calculates system stability metrics
    - Updates historical records
    - Tracks pod-specific performance
-
-## Key Parameters
-
-### Protocol Parameters
-- **γ (Gamma)**: Controls veToken power scaling with lock duration
-- **α (Alpha)**: Weight of performance in vote allocation
-- **δ (Delta)**: Base weight for vote diversification
-- **ω (Omega)**: FCU generation rate
-
-### Market Parameters
-- **Base Fee Rate**: Underlying rate for fee generation
-- **Growth Rate**: Market growth trend
-- **Volatility**: Market uncertainty
-
-### Pod Parameters
-- **Fee Drift**: Base rate of fee generation
-- **Fee Split**: Portion of fees distributed to FCU holders
-- **FCU Delay**: Time before FCUs become active
-
-### System Parameters
-- **Lock Durations**: Min and max allowed lock periods
-- **Initial Supply**: Starting token supply
-- **Emission Schedule**: Token emission rate over time
 """)
-
-
-# """
-# ## Success Metrics
-
-# The simulation tracks several key metrics to evaluate system health:
-
-# 1. **Economic Metrics**
-#    - Fee generation efficiency
-#    - Emission vs fee balance
-#    - TVL growth
-
-# 2. **Participation Metrics**
-#    - Active positions
-#    - Average lock duration
-#    - Vote distribution entropy
-
-# 3. **Pod Performance**
-#    - Individual pod fee generation
-#    - FCU efficiency
-#    - Vote share stability
-
-# 4. **Market Indicators**
-#    - Total fees vs emissions
-#    - Vesting progress
-#    - Market rate evolution
-# """
