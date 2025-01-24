@@ -51,7 +51,7 @@ a constant growth rate of fees that the pod generates.
 ### 4. FCU Mechanics
 FCUs represent claims on future pod fees:
 
-- **Generation**: Based on vote allocation and fee generation
+- **Generation**: Based on vote allocation
 - **Activation**: After pod-specific delay period
 - **Duration**: Active for τ epochs once activated
 - **Fee Distribution**: Pro-rata share of pod's distributable fees
