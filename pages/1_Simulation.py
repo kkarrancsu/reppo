@@ -7,9 +7,9 @@ from vetoken import (
     SimulationParams,
     MarketState,
     DeterministicConfig,
-    StakingConfig,
     PodConfig,
-    DeterministicSimulation
+    DeterministicSimulation,
+    TokenBuyConfig
 )
 from vesting import (
     VestingSchedule,
@@ -53,7 +53,19 @@ def create_simulation_inputs():
             help="Rate at which Fee Claim Units (FCUs) are generated relative to fees. "
                  "Higher values create more FCUs per unit of fees generated."
         )
-    
+        lock_duration = st.number_input(
+            "Lock Duration",
+            value=52,
+            step=1,
+            help="Duration of the lock in epochs."
+        )
+        lock_interval = st.number_input(
+            "Lock Interval",
+            value=3,
+            step=1,
+            help="Interval at which new locks can be created in epochs."
+        )
+        
     with st.sidebar.expander("Pod Parameters"):
         max_lock_duration = st.number_input(
             "Max Lock Duration", 
@@ -186,6 +198,23 @@ def create_simulation_inputs():
                      "Longer durations create smoother token distribution."
             )
 
+    with st.sidebar.expander("Token Buy Parameters"):
+        token_buy_rate = st.slider(
+            "Base Buy Rate",
+            0.0, 10000.0, 1000.0, 100.0,
+            help="Base rate of token purchases per epoch"
+        )
+        market_sensitivity = st.slider(
+            "Market Sensitivity",
+            0.0, 1.0, 0.5, 0.1,
+            help="How much market performance affects buying behavior"
+        )
+        randomization = st.slider(
+            "Randomization Factor",
+            0.0, 0.5, 0.2, 0.05,
+            help="Random variation in purchase amounts"
+        )
+
     return {
         "simulation_type": simulation_type,
         "protocol": {
@@ -196,8 +225,10 @@ def create_simulation_inputs():
         },
         "pods": {
             "num_pods": num_pods,
-            "max_lock_duration": max_lock_duration,
-            "min_lock_duration": min_lock_duration,
+            # "max_lock_duration": max_lock_duration,
+            # "min_lock_duration": min_lock_duration,
+            "lock_duration": lock_duration,
+            "lock_interval": lock_interval,
             "base_fee_drift": base_fee_drift if simulation_type == "Stochastic" else 0.0,
             "pod_configs": pod_configs if simulation_type == "Deterministic" else None,
             
@@ -220,6 +251,11 @@ def create_simulation_inputs():
             "base_stake_rate": base_stake_rate,
             "fixed_amount": fixed_stake_amount if simulation_type == "Deterministic" else 0.0,
             "fixed_duration": fixed_stake_duration if simulation_type == "Deterministic" else 0.0
+        },
+        "token_buy": {
+            "base_buy_rate": token_buy_rate,
+            "market_sensitivity": market_sensitivity,
+            "randomization": randomization
         }
     }
 
@@ -238,8 +274,10 @@ def create_simulation(config):
         fee_volatility=0.1,
         base_stake_rate=config["staking"]["base_stake_rate"],
         base_fee_drift=config["pods"]["base_fee_drift"],
-        max_lock_duration=config["pods"]["max_lock_duration"],
-        min_lock_duration=config["pods"]["min_lock_duration"],
+        # max_lock_duration=config["pods"]["max_lock_duration"],
+        # min_lock_duration=config["pods"]["min_lock_duration"],
+        lock_duration=config["pods"]["lock_duration"],
+        lock_interval=config["pods"]["lock_interval"],
         initial_pods=initial_pods,
         initial_token_supply=config["general"]["initial_token_supply"],
         epochs=config["general"]["epochs"],
@@ -254,10 +292,7 @@ def create_simulation(config):
     
     if config["simulation_type"] == "Deterministic":
         det_config = DeterministicConfig(
-            staking=StakingConfig(
-                amount_per_epoch=config["staking"]["fixed_amount"],
-                duration=config["staking"]["fixed_duration"]
-            ),
+            staking_amount_per_interval=config["staking"]["fixed_amount"],
             pods={
                 pod: PodConfig(
                     fee_growth=pod_cfg["fee_growth"],
@@ -267,9 +302,16 @@ def create_simulation(config):
             },
             market_growth=config["market"].growth_rate
         )
-        return DeterministicSimulation(params, det_config)
+        sim = DeterministicSimulation(params, det_config)
     else:
-        return VeTokenomicsSimulation(params)
+        sim = VeTokenomicsSimulation(params)
+    
+    sim.token_buy_config = TokenBuyConfig(
+        base_buy_rate=config["token_buys"]["base_buy_rate"],
+        market_sensitivity=config["token_buys"]["market_sensitivity"],
+        randomization_factor=config["token_buys"]["randomization_factor"]
+    )
+    return sim
 
 def create_pod_metrics_tab(history):
     st.header("Pod Performance Metrics")
@@ -619,7 +661,7 @@ def check_password():
         st.stop()
 
 def main():
-    check_password()
+    # check_password()
     st.title("VeTokenomics Simulation")
     
     inputs = create_simulation_inputs()

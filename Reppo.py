@@ -117,6 +117,7 @@ For each epoch, the following steps are taken:
    - Emission distributions
    - FCU activations
    - Lock expirations (i.e. veReppo ==> Reppo)
+   - TODO: FCU expirations
 
 2. **Market Update**
    - Updates base fee rate with growth and volatility (in stochastic simulation)
