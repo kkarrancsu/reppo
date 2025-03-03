@@ -225,7 +225,7 @@ def create_simulation_inputs():
         },
         "pods": {
             "num_pods": num_pods,
-            # "max_lock_duration": max_lock_duration,
+            "max_lock_duration": max_lock_duration,
             # "min_lock_duration": min_lock_duration,
             "lock_duration": lock_duration,
             "lock_interval": lock_interval,
@@ -274,7 +274,7 @@ def create_simulation(config):
         fee_volatility=0.1,
         base_stake_rate=config["staking"]["base_stake_rate"],
         base_fee_drift=config["pods"]["base_fee_drift"],
-        # max_lock_duration=config["pods"]["max_lock_duration"],
+        max_lock_duration=config["pods"]["max_lock_duration"],
         # min_lock_duration=config["pods"]["min_lock_duration"],
         lock_duration=config["pods"]["lock_duration"],
         lock_interval=config["pods"]["lock_interval"],
@@ -307,9 +307,9 @@ def create_simulation(config):
         sim = VeTokenomicsSimulation(params)
     
     sim.token_buy_config = TokenBuyConfig(
-        base_buy_rate=config["token_buys"]["base_buy_rate"],
-        market_sensitivity=config["token_buys"]["market_sensitivity"],
-        randomization_factor=config["token_buys"]["randomization_factor"]
+        base_buy_rate=config["token_buy"]["base_buy_rate"],
+        market_sensitivity=config["token_buy"]["market_sensitivity"],
+        randomization_factor=config["token_buy"]["randomization"]
     )
     return sim
 

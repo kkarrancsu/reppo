@@ -209,8 +209,8 @@ class User:
     def can_stake(self, amount: float) -> bool:
         return amount <= self.token_balance
     
-    def ve_power(self, params: SimulationParams) -> float:
-        if not self.is_locked(params.current_epoch):
+    def ve_power(self, current_epoch: int, params: SimulationParams) -> float:
+        if not self.is_locked(current_epoch):
             return 0
         duration_weight = (self.lock_duration / params.max_lock_duration) ** params.gamma
         return self.staked_amount * duration_weight
@@ -327,7 +327,7 @@ class VeTokenomicsSimulation:
         user.staked_amount = amount
         user.lock_start_epoch = self.state.epoch
         user.lock_duration = self.params.lock_duration
-        user.cached_ve_power = user.ve_power(self.params)
+        user.cached_ve_power = user.ve_power(self.state.epoch, self.params)
         
         # Randomly allocate votes across pods initially
         total_power = user.cached_ve_power
